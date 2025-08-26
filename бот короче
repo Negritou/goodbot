@@ -1,0 +1,807 @@
+import asyncio
+import json
+import os
+from aiogram import types
+from apscheduler.schedulers.asyncio import AsyncIOScheduler
+from apscheduler.jobstores.memory import MemoryJobStore
+from datetime import datetime, timedelta
+from random import uniform, randint
+from aiogram import Bot, Dispatcher, F
+from aiogram.types import Message, InlineKeyboardButton, InlineKeyboardMarkup, CallbackQuery
+from aiogram.filters import Command
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.enums.parse_mode import ParseMode
+
+# === Настройки ===
+TOKEN = "8397737792:AAHLYGC9AJOSJtWJa-CF2hmnrphGOpDgRVE"  # ⚠️ Замени на свой
+DATA_FILE = "users.json"
+
+ADMIN_ID = 5831677681  # ⚠️ Замени на свой ID админа
+GROW_COOLDOWN = timedelta(hours=1)
+SMOKE_COOLDOWN = timedelta(hours=1)
+IQ_COOLDOWN = timedelta(hours=1)
+CUSTOM_COOLDOWN = timedelta(hours=1)  # Кулдаун для кастомной команды
+
+SMOKER_LEVELS = {
+    0: "Новичок",
+    50: "Любитель",
+    100: "Опытный курильщик",
+    150: "Зависимый",
+    200: "Профессионал",
+    250: "Ветеран",
+    300: "Никотиновый маньяк",
+    350: "Ходячая пепельница",
+    400: "Терминатор табака",
+    450: "Смертельно больной раком"
+}
+
+# Уровни IQ
+IQ_LEVELS = {
+    -1000: "Идиот",
+    0: "Начинающий мыслитель",
+    50: "Ученик",
+    100: "Интеллектуал",
+    150: "Эрудит",
+    200: "Гений",
+    300: "Вундеркинд",
+    400: "Философ",
+    500: "Профессор",
+    700: "Магистр мозга"
+}
+
+# Настройки кастомной команды (можно менять)
+CUSTOM_CONFIG = {
+    "command_name": "/sex",  # ⚠️ Можно изменить
+    "stat_name": "занялся сексом",  # ⚠️ Можно изменить
+    "emoji": "⚡",  # ⚠️ Можно изменить
+    "unit": "раз",  # ⚠️ Можно изменить
+    "min_gain": 1,  # ⚠️ Можно изменить
+    "max_gain": 40,  # ⚠️ Можно изменить
+    "levels": {  # ⚠️ Можно изменить уровни
+        0: "Новичок",
+        100: "Профи",
+        250: "Мастер",
+        500: "Легенда",
+        750: "Гуру",
+        1000: "Абсолютный трахатель"
+    }
+}
+
+
+# === Загрузка данных ===
+def load_users():
+    if not os.path.exists(DATA_FILE):
+        return {}
+    try:
+        with open(DATA_FILE, 'r', encoding='utf-8') as f:
+            data = json.load(f)
+            return {int(k): v for k, v in data.items()}
+    except (json.JSONDecodeError, ValueError):
+        return {}
+
+
+def save_users(users):
+    with open(DATA_FILE, 'w', encoding='utf-8') as f:
+        json.dump(users, f, ensure_ascii=False, indent=4)
+
+
+# === Инициализация пользователя ===
+def init_user(user_id):
+    if user_id not in users_data:
+        users_data[user_id] = {
+            "size": 0.0,
+            "puffs_count": 0,
+            "iq_score": 0,
+            "custom_score": 0,
+            "last_grow_used": None,
+            "last_smoke_used": None,
+            "last_iq_used": None,
+            "last_custom_used": None
+        }
+        save_users(users_data)
+
+
+# === Формат времени ===
+def format_timedelta(td):
+    total_seconds = int(td.total_seconds())
+    if total_seconds <= 0:
+        return "00:00:00"
+    h, rem = divmod(total_seconds, 3600)
+    m, s = divmod(rem, 60)
+    return f"{h:02}:{m:02}:{s:02}"
+
+
+# === Ссылка на пользователя без превью ===
+def get_user_link(user_id, first_name=None, username=None):
+    if not first_name:
+        first_name = "Пользователь"
+    if username:
+        return f'<a href="https://t.me/{username}">{first_name}</a>'
+    else:
+        return f'<a href="tg://user?id={user_id}">{first_name}</a>'
+
+
+# === Получение информации о пользователе ===
+async def get_user_info(bot, user_id):
+    try:
+        user = await bot.get_chat(user_id)
+        return user.first_name, user.username
+    except:
+        return "Пользователь", None
+
+
+# === Проверка доступа ===
+def can_use_grow(user_id):
+    init_user(user_id)  # Инициализируем пользователя если его нет
+    last_str = users_data[user_id].get("last_grow_used")
+    if not last_str:
+        return True, None
+    try:
+        last_used = datetime.fromisoformat(last_str)
+    except ValueError:
+        return True, None
+    next_use = last_used + GROW_COOLDOWN
+    now = datetime.now()
+    if now >= next_use:
+        return True, None
+    return False, next_use - now
+
+
+def can_use_smoke(user_id):
+    init_user(user_id)  # Инициализируем пользователя если его нет
+    last_str = users_data[user_id].get("last_smoke_used")
+    if not last_str:
+        return True, None
+    try:
+        last_used = datetime.fromisoformat(last_str)
+    except ValueError:
+        return True, None
+    next_use = last_used + SMOKE_COOLDOWN
+    now = datetime.now()
+    if now >= next_use:
+        return True, None
+    return False, next_use - now
+
+
+def can_use_iq(user_id):
+    init_user(user_id)  # Инициализируем пользователя если его нет
+    last_str = users_data[user_id].get("last_iq_used")
+    if not last_str:
+        return True, None
+    try:
+        last_used = datetime.fromisoformat(last_str)
+    except ValueError:
+        return True, None
+    next_use = last_used + IQ_COOLDOWN
+    now = datetime.now()
+    if now >= next_use:
+        return True, None
+    return False, next_use - now
+
+
+def can_use_custom(user_id):
+    init_user(user_id)  # Инициализируем пользователя если его нет
+    last_str = users_data[user_id].get("last_custom_used")
+    if not last_str:
+        return True, None
+    try:
+        last_used = datetime.fromisoformat(last_str)
+    except ValueError:
+        return True, None
+    next_use = last_used + CUSTOM_COOLDOWN
+    now = datetime.now()
+    if now >= next_use:
+        return True, None
+    return False, next_use - now
+
+
+# === Получение уровней ===
+def get_smoker_level(puffs_count):
+    current_level = "Новичок"
+    for threshold, level_name in sorted(SMOKER_LEVELS.items(), reverse=True):
+        if puffs_count >= threshold:
+            current_level = level_name
+            break
+    return current_level
+
+
+def get_iq_level(iq_score):
+    current_level = "Идиот"
+    for threshold, level_name in sorted(IQ_LEVELS.items(), reverse=True):
+        if iq_score >= threshold:
+            current_level = level_name
+            break
+    return current_level
+
+
+def get_custom_level(score):
+    current_level = "Новичок"
+    for threshold, level_name in sorted(CUSTOM_CONFIG["levels"].items(), reverse=True):
+        if score >= threshold:
+            current_level = level_name
+            break
+    return current_level
+
+
+# === Топы ===
+async def get_global_top(category, bot, limit=10):
+    if category == "size":
+        sorted_users = sorted(users_data.items(), key=lambda x: x[1].get("size", 0), reverse=True)
+        title = "🍆 ТОП ПО РАЗМЕРУ ЧЛЕНА"
+        emoji = "🍆"
+        value_func = lambda x: f"{x.get('size', 0):.1f} см"
+    elif category == "smoke":
+        sorted_users = sorted(users_data.items(), key=lambda x: x[1].get("puffs_count", 0), reverse=True)
+        title = "🚬 ТОП КУРИЛЬЩИКОВ"
+        emoji = "🚬"
+        value_func = lambda x: f"{x.get('puffs_count', 0)} затяжек"
+    elif category == "iq":
+        sorted_users = sorted(users_data.items(), key=lambda x: x[1].get("iq_score", 0), reverse=True)
+        title = "🧠 ТОП ИНТЕЛЛЕКТУАЛОВ"
+        emoji = "🧠"
+        value_func = lambda x: f"{x.get('iq_score', 0)} IQ"
+    elif category == "sex":
+        sorted_users = sorted(users_data.items(), key=lambda x: x[1].get("custom_score", 0), reverse=True)
+        title = f"{CUSTOM_CONFIG['emoji']} ТОП СЕКСУАЛЬНЫХ ГЕРОЕВ"
+        emoji = CUSTOM_CONFIG["emoji"]
+        value_func = lambda x: f"{x.get('custom_score', 0)} {CUSTOM_CONFIG['unit']}"
+    else:
+        return "❌ Неизвестная категория"
+
+    top_text = f"🏆 <b>{title}</b>\n\n"
+
+    for i, (user_id, user_data) in enumerate(sorted_users[:limit], 1):
+        first_name, username = await get_user_info(bot, user_id)
+        user_link = get_user_link(user_id, first_name, username)
+        value = value_func(user_data)
+        top_text += f"{i}. {user_link} - {emoji} {value}\n"
+
+    return top_text
+
+
+async def get_group_top(category, chat_id, bot, limit=10):
+    # Фильтруем пользователей, которые есть в данных
+    group_users = {}
+
+    # Пытаемся получить участников чата для группового топа
+    try:
+        chat_members = await bot.get_chat_administrators(chat_id)
+        member_ids = [member.user.id for member in chat_members]
+        # Добавляем всех пользователей из данных, которые есть в группе
+        for user_id, data in users_data.items():
+            if user_id in member_ids:
+                group_users[user_id] = data
+    except:
+        # Если не удалось получить участников, используем всех пользователей из данных
+        group_users = users_data.copy()
+
+    if category == "size":
+        sorted_users = sorted(group_users.items(), key=lambda x: x[1].get("size", 0), reverse=True)
+        title = "🍆 ТОП ГРУППЫ ПО РАЗМЕРУ ЧЛЕНА"
+        emoji = "🍆"
+        value_func = lambda x: f"{x.get('size', 0):.1f} см"
+    elif category == "smoke":
+        sorted_users = sorted(group_users.items(), key=lambda x: x[1].get("puffs_count", 0), reverse=True)
+        title = "🚬 ТОП ГРУППЫ КУРИЛЬЩИКОВ"
+        emoji = "🚬"
+        value_func = lambda x: f"{x.get('puffs_count', 0)} затяжек"
+    elif category == "iq":
+        sorted_users = sorted(group_users.items(), key=lambda x: x[1].get("iq_score", 0), reverse=True)
+        title = "🧠 ТОП ГРУППЫ ИНТЕЛЛЕКТУАЛОВ"
+        emoji = "🧠"
+        value_func = lambda x: f"{x.get('iq_score', 0)} IQ"
+    elif category == "sex":
+        sorted_users = sorted(group_users.items(), key=lambda x: x[1].get("custom_score", 0), reverse=True)
+        title = f"{CUSTOM_CONFIG['emoji']} ТОП ГРУППЫ СЕКСУАЛЬНЫХ ГЕРОЕВ"
+        emoji = CUSTOM_CONFIG["emoji"]
+        value_func = lambda x: f"{x.get('custom_score', 0)} {CUSTOM_CONFIG['unit']}"
+    else:
+        return "❌ Неизвестная категория"
+
+    top_text = f"🏆 <b>{title}</b>\n\n"
+
+    if not sorted_users:
+        top_text += "📊 В этой группе пока нет статистики\n"
+    else:
+        for i, (user_id, user_data) in enumerate(sorted_users[:limit], 1):
+            first_name, username = await get_user_info(bot, user_id)
+            user_link = get_user_link(user_id, first_name, username)
+            value = value_func(user_data)
+            top_text += f"{i}. {user_link} - {emoji} {value}\n"
+
+    return top_text
+
+
+# === Клавиатуры для топа ===
+def get_top_keyboard(is_private, current_category="size", top_type="global"):
+    builder = InlineKeyboardBuilder()
+
+    categories = [
+        ("🍆 Размер", "size"),
+        ("🚬 Курение", "smoke"),
+        ("🧠 IQ", "iq"),
+        (f"{CUSTOM_CONFIG['emoji']} Секс", "sex")
+    ]
+
+    for emoji_text, category in categories:
+        if category == current_category:
+            emoji_text = f"✅ {emoji_text}"
+        builder.add(InlineKeyboardButton(
+            text=emoji_text,
+            callback_data=f"top_{top_type}_{category}"
+        ))
+
+    if is_private:
+        # Кнопки переключения между глобальным топом и топом группы
+        if top_type == "global":
+            builder.add(InlineKeyboardButton(
+                text="👥 Перейти к топу группы",
+                callback_data="top_switch_group"
+            ))
+        else:
+            builder.add(InlineKeyboardButton(
+                text="🌍 Перейти к глобальному топу",
+                callback_data="top_switch_global"
+            ))
+
+    builder.adjust(2)
+    return builder.as_markup()
+
+
+# === Глобальные данные ===
+bot = Bot(token=TOKEN)
+dp = Dispatcher()
+users_data = load_users()
+
+
+# === /start ===
+@dp.message(Command("start"))
+async def cmd_start(message: Message):
+    user_id = message.from_user.id
+    user_link = get_user_link(user_id, message.from_user.first_name, message.from_user.username)
+
+    # Инициализация пользователя
+    init_user(user_id)
+
+    text = (
+        f"🎮 <b>Добро пожаловать, {user_link}!</b>\n\n"
+        f"✨ <b>Доступные игры:</b>\n\n"
+        f"🍆 <b>/dick</b> - Увеличивай свой член каждый час!\n"
+        f"⏰ Кулдаун: 1 час\n\n"
+        f"🚬 <b>/smoke</b> - Делай затяжки и повышай уровень!\n"
+        f"⏰ Кулдаун: 1 час\n\n"
+        f"🧠 <b>/iq</b> - Прокачивай интеллект и становись умнее!\n"
+        f"⏰ Кулдаун: 1 час\n\n"
+        f"{CUSTOM_CONFIG['emoji']} <b>{CUSTOM_CONFIG['command_name']}</b> - Занимайся сексом и прокачивайся!\n"
+        f"⏰ Кулдаун: 1 час\n\n"
+        f"📊 <b>/mystats</b> - Вся статистика в одном месте\n\n"
+        f"🏆 <b>/top</b> - Топ игроков\n\n"
+        f"<i>Выбери игру и начни свой путь к величию! 🚀</i>"
+    )
+
+    await message.reply(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
+# === /mystats ===
+@dp.message(Command("mystats"))
+async def cmd_mystats(message: Message):
+    user_id = message.from_user.id
+    user_link = get_user_link(user_id, message.from_user.first_name, message.from_user.username)
+
+    # Инициализация пользователя если его нет
+    init_user(user_id)
+
+    user_data = users_data[user_id]
+    size = user_data.get("size", 0.0)
+    puffs_count = user_data.get("puffs_count", 0)
+    iq_score = user_data.get("iq_score", 0)
+    custom_score = user_data.get("custom_score", 0)
+
+    smoker_level = get_smoker_level(puffs_count)
+    iq_level = get_iq_level(iq_score)
+    custom_level = get_custom_level(custom_score)
+
+    text = (
+        f"📊 <b>Статистика {user_link}</b>\n\n"
+        f"🍆 <b>Размер:</b>\n"
+        f"   • твой писюн размером: <i><b>{size:.1f} см</b></i>\n\n"
+        f"🚬 <b>Курение:</b>\n"
+        f"   • Затяжки: <i><b>{puffs_count}</b></i>\n"
+        f"   • Уровень: <i><b>{smoker_level}</b></i>\n\n"
+        f"🧠 <b>Интеллект:</b>\n"
+        f"   • IQ: <i><b>{iq_score}</b></i>\n"
+        f"   • Уровень: <i><b>{iq_level}</b></i>\n\n"
+        f"{CUSTOM_CONFIG['emoji']} <b>{CUSTOM_CONFIG['stat_name']}:</b>\n"
+        f"   • ты занялся сексом: <i><b>{custom_score} {CUSTOM_CONFIG['unit']}</b></i>\n"
+        f"   • Уровень: <i><b>{custom_level}</b></i>"
+    )
+
+    await message.reply(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
+# === /top ===
+@dp.message(Command("top"))
+async def cmd_top(message: Message):
+    is_private = message.chat.type == "private"
+
+    if is_private:
+        # В личных сообщениях показываем глобальный топ по умолчанию
+        top_text = await get_global_top("size", bot)
+        keyboard = get_top_keyboard(is_private, "size", "global")
+        await message.reply(top_text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    else:
+        # В группе показываем топ группы
+        top_text = await get_group_top("size", message.chat.id, bot)
+        keyboard = get_top_keyboard(is_private, "size", "group")
+        await message.reply(top_text, reply_markup=keyboard, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
+# === Обработка инлайн-кнопок топа ===
+@dp.callback_query(F.data.startswith("top_"))
+async def handle_top_callback(callback: CallbackQuery):
+    data = callback.data
+    is_private = callback.message.chat.type == "private"
+
+    if data == "top_switch_global":
+        # Переключение на глобальный топ
+        top_text = await get_global_top("size", bot)
+        keyboard = get_top_keyboard(is_private, "size", "global")
+        await callback.message.edit_text(top_text, reply_markup=keyboard,
+                                         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    elif data == "top_switch_group":
+        # Переключение на топ группы
+        top_text = await get_group_top("size", callback.message.chat.id, bot)
+        keyboard = get_top_keyboard(is_private, "size", "group")
+        await callback.message.edit_text(top_text, reply_markup=keyboard,
+                                         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    elif data.startswith("top_global_") or data.startswith("top_group_"):
+        # Обработка выбора категории
+        parts = data.split("_")
+        top_type = parts[1]  # global или group
+        category = parts[2]  # size, smoke, iq, sex
+
+        if top_type == "global":
+            top_text = await get_global_top(category, bot)
+        else:
+            top_text = await get_group_top(category, callback.message.chat.id, bot)
+
+        keyboard = get_top_keyboard(is_private, category, top_type)
+        await callback.message.edit_text(top_text, reply_markup=keyboard,
+                                         parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+    await callback.answer()
+
+
+# === /grow ===
+@dp.message(Command("dick"))
+async def cmd_grow(message: Message):
+    user_id = message.from_user.id
+    user_link = get_user_link(user_id, message.from_user.first_name, message.from_user.username)
+    available, wait_time = can_use_grow(user_id)
+
+    if not available:
+        timer = format_timedelta(wait_time)
+        current_size = users_data[user_id].get("size", 0.0)
+        text = (
+            f"🍆 <b>{user_link}</b>, ты уже использовал команду сегодня.\n\n"
+            f"<blockquote>⏳ Осталось ждать: <b>{timer}</b></blockquote>\n\n"
+            f"📏 Твой текущий размер: <i><b>{current_size:.1f} см</b></i>"
+        )
+        await message.reply(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
+
+    # Изменение размера
+    growth = round(uniform(-10.0, 40.0), 1)
+    old_size = users_data[user_id].get("size", 0.0)
+    new_size = round(old_size + growth, 1)
+
+    # Сохраняем
+    users_data[user_id].update({
+        "size": new_size,
+        "last_grow_used": datetime.now().isoformat()
+    })
+    save_users(users_data)
+
+    emoji = "📈" if growth >= 0 else "📉"
+    sign = "+" if growth >= 0 else ""
+
+    text = (
+        f"🍆 <b>{user_link}</b>, ты изменил размер члена на <b>{sign}{growth} см</b> {emoji}\n\n"
+        f"📏 Твой текущий размер: <i><b>{new_size:.1f} см</b></i>"
+    )
+
+    await message.reply(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
+# === /smoke ===
+@dp.message(Command("smoke"))
+async def cmd_smoke(message: Message):
+    user_id = message.from_user.id
+    user_link = get_user_link(user_id, message.from_user.first_name, message.from_user.username)
+    available, wait_time = can_use_smoke(user_id)
+
+    if not available:
+        timer = format_timedelta(wait_time)
+        puffs_count = users_data[user_id].get("puffs_count", 0)
+        smoker_level = get_smoker_level(puffs_count)
+        text = (
+            f"🚬 <b>{user_link}</b>, ты уже курил в последний час.\n\n"
+            f"<blockquote>⏳ Осталось ждать: <b>{timer}</b></blockquote>\n\n"
+            f"🎯 Уровень курильщика: <i><b>{smoker_level}</b></i>\n"
+            f"💨 Всего затяжек: <i><b>{puffs_count}</b></i>"
+        )
+        await message.reply(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
+
+    # Делаем затяжки
+    puffs = randint(1, 3)
+    old_puffs = users_data[user_id].get("puffs_count", 0)
+    new_puffs = old_puffs + puffs
+    smoker_level = get_smoker_level(new_puffs)
+
+    # Определяем правильное окончание
+    if puffs == 1:
+        puffs_text = "затяжку"
+    elif 2 <= puffs <= 4:
+        puffs_text = "затяжки"
+    else:
+        puffs_text = "затяжек"
+
+    # Сохраняем
+    users_data[user_id].update({
+        "puffs_count": new_puffs,
+        "last_smoke_used": datetime.now().isoformat()
+    })
+    save_users(users_data)
+
+    text = (
+        f"🚬 <b>{user_link}</b>, ты сделал(а) <b>{puffs} {puffs_text}</b>\n\n"
+        f"🎯 Уровень курильщика: <i><b>{smoker_level}</b></i>\n"
+        f"💨 Всего затяжек: <i><b>{new_puffs}</b></i>"
+    )
+
+    await message.reply(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
+# === /iq ===
+@dp.message(Command("iq"))
+async def cmd_iq(message: Message):
+    user_id = message.from_user.id
+    user_link = get_user_link(user_id, message.from_user.first_name, message.from_user.username)
+    available, wait_time = can_use_iq(user_id)
+
+    if not available:
+        timer = format_timedelta(wait_time)
+        iq_score = users_data[user_id].get("iq_score", 0)
+        iq_level = get_iq_level(iq_score)
+        text = (
+            f"🧠 <b>{user_link}</b>, ты уже тренировал мозг в последний час.\n\n"
+            f"<blockquote>⏳ Осталось ждать: <b>{timer}</b></blockquote>\n\n"
+            f"🎓 Уровень интеллекта: <i><b>{iq_level}</b></i>\n"
+            f"📊 Твой IQ: <i><b>{iq_score}</b></i>"
+        )
+        await message.reply(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
+
+    # Изменение IQ
+    iq_change = randint(-5, 20)
+    old_iq = users_data[user_id].get("iq_score", 0)
+    new_iq = old_iq + iq_change
+    iq_level = get_iq_level(new_iq)
+
+    # Сохраняем
+    users_data[user_id].update({
+        "iq_score": new_iq,
+        "last_iq_used": datetime.now().isoformat()
+    })
+    save_users(users_data)
+
+    emoji = "📈" if iq_change >= 0 else "📉"
+    sign = "+" if iq_change >= 0 else ""
+
+    text = (
+        f"🧠 <b>{user_link}</b>, ты изменил свой IQ на <b>{sign}{iq_change}</b> {emoji}\n\n"
+        f"📊 Твой текущий IQ: <i><b>{new_iq}</b></i>\n"
+        f"🎓 Уровень интеллекта: <i><b>{iq_level}</b></i>"
+    )
+
+    await message.reply(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
+# === Кастомная команда ===
+@dp.message(Command("sex"))
+async def cmd_custom(message: Message):
+    user_id = message.from_user.id
+    user_link = get_user_link(user_id, message.from_user.first_name, message.from_user.username)
+    available, wait_time = can_use_custom(user_id)
+
+    if not available:
+        timer = format_timedelta(wait_time)
+        custom_score = users_data[user_id].get("custom_score", 0)
+        custom_level = get_custom_level(custom_score)
+        text = (
+            f"{CUSTOM_CONFIG['emoji']} <b>{user_link}</b>, ты уже использовал команду.\n\n"
+            f"<blockquote>⏳ Осталось ждать: <b>{timer}</b></blockquote>\n\n"
+            f"🏆 Уровень: <i><b>{custom_level}</b></i>\n"
+            f"📊 {CUSTOM_CONFIG['stat_name']}: <i><b>{custom_score} {CUSTOM_CONFIG['unit']}</b></i>"
+        )
+        await message.reply(
+            text,
+            parse_mode=ParseMode.HTML,
+            disable_web_page_preview=True
+        )
+        return
+
+    # Изменение кастомного параметра
+    gain = randint(CUSTOM_CONFIG["min_gain"], CUSTOM_CONFIG["max_gain"])
+    old_score = users_data[user_id].get("custom_score", 0)
+    new_score = old_score + gain
+    custom_level = get_custom_level(new_score)
+
+    # Сохраняем
+    users_data[user_id].update({
+        "custom_score": new_score,
+        "last_custom_used": datetime.now().isoformat()
+    })
+    save_users(users_data)
+
+    text = (
+        f"{CUSTOM_CONFIG['emoji']} <b>{user_link}</b>, ты поебался <b>+{gain} {CUSTOM_CONFIG['unit']}раз</b> 📈\n\n"
+        f"📊 {CUSTOM_CONFIG['stat_name']}: <i><b>{new_score} {CUSTOM_CONFIG['unit']}</b></i>\n"
+        f"🏆 Уровень: <i><b>{custom_level}</b></i>"
+    )
+
+    await message.reply(
+        text,
+        parse_mode=ParseMode.HTML,
+        disable_web_page_preview=True
+    )
+
+
+# === Рассылка (только для админа) ===
+@dp.message(Command("broadcast"))
+async def cmd_broadcast(message: Message):
+    if message.from_user.id != ADMIN_ID:
+        await message.reply("❌ Эта команда только для администратора!")
+        return
+
+    # Проверяем, есть ли фото
+    if message.photo:
+        # Получаем самый большой размер фото
+        photo = message.photo[-1]
+        caption = message.caption or ""
+
+        # Убираем команду из caption если она там есть
+        if caption.startswith('/broadcast'):
+            caption = caption.replace('/broadcast', '').strip()
+
+        if not caption:
+            await message.reply("❌ Укажите текст для рассылки в подписи к фото!")
+            return
+
+        # Отправляем рассылку с фото всем пользователям
+        success_count = 0
+        fail_count = 0
+
+        for user_id in users_data.keys():
+            try:
+                await bot.send_photo(
+                    chat_id=user_id,
+                    photo=photo.file_id,
+                    caption=f"📢 <b>РАССЫЛКА:</b>\n\n{caption}",
+                    parse_mode=ParseMode.HTML
+                )
+                success_count += 1
+                await asyncio.sleep(0.1)  # Чтобы не спамить Telegram
+            except Exception as e:
+                print(f"Ошибка отправки пользователю {user_id}: {e}")
+                fail_count += 1
+
+        await message.reply(
+            f"✅ Рассылка с фото завершена!\n"
+            f"✓ Успешно: {success_count}\n"
+            f"✗ Ошибок: {fail_count}"
+        )
+
+    else:
+        # Текстовая рассылка
+        broadcast_text = message.text.replace('/broadcast', '').strip()
+        if not broadcast_text:
+            await message.reply("❌ Укажите текст для рассылки после команды или прикрепите фото с текстом!")
+            return
+
+        # Отправляем рассылку всем пользователям
+        success_count = 0
+        fail_count = 0
+
+        for user_id in users_data.keys():
+            try:
+                await bot.send_message(
+                    chat_id=user_id,
+                    text=f"📢 <b>РАССЫЛКА:</b>\n\n{broadcast_text}",
+                    parse_mode=ParseMode.HTML
+                )
+                success_count += 1
+                await asyncio.sleep(0.1)  # Чтобы не спамить Telegram
+            except Exception as e:
+                print(f"Ошибка отправки пользователю {user_id}: {e}")
+                fail_count += 1
+
+        await message.reply(
+            f"✅ Рассылка завершена!\n"
+            f"✓ Успешно: {success_count}\n"
+            f"✗ Ошибок: {fail_count}"
+        )
+
+
+# === Остальные команды и текст ===
+@dp.message(F.text.startswith("/55"))
+async def unknown_command(message: Message):
+    if message.text not in ["/start", "/dick", "/smoke", "/iq", "/sex", "/mystats", "/broadcast", "/top"]:
+        await message.reply("❌ Неизвестная команда! Доступные: /start, /dick, /smoke, /iq, /sex, /mystats, /top")
+
+
+@dp.message(F.text)
+async def handle_text(message: Message):
+    pass  # Игнор
+
+# === Запуск ===
+# === Запуск ===
+async def main():
+    print("✅ Бот запущен и готов к работе!")
+    print(f"📊 Загружено пользователей: {len(users_data)}")
+
+    # Запускаем автопостинг, если включён
+    if AUTOPOST_ENABLED:
+        scheduler.add_job(
+            autpost_to_group,
+            'interval',
+            minutes=AUTOPOST_INTERVAL_MINUTES,
+            id='autpost_job'
+        )
+        scheduler.start()
+        print(f"⏰ Автопостинг включён: каждые {AUTOPOST_INTERVAL_MINUTES} минут в {AUTOPOST_CHAT_USERNAME}")
+
+    # Запуск поллинга
+    await dp.start_polling(bot, allowed_updates=["message", "callback_query"])
+
+if __name__ == "__main__":
+    try:
+        asyncio.run(main())
+        asyncio.create_task(ping_scheduler())
+    except KeyboardInterrupt:
+        print("🛑 Бот остановлен.")
